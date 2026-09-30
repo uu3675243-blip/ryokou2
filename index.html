@@ -41,6 +41,7 @@
         width: 100%;
         height: 100%;
         border-radius: 0.75rem;
+        z-index: 10;
       }
       @media print {
         body { background: #fff !important; color: #000 !important; }
@@ -149,6 +150,41 @@
         return `¥${(n || 0).toLocaleString('ja-JP')}`;
       }
 
+      // --- 画像圧縮ユーティリティ (Canvas利用) ---
+      function compressImage(file, maxWidth = 800, quality = 0.7) {
+        return new Promise((resolve, reject) => {
+          if (!file || !file.type.startsWith('image/')) {
+            return reject(new Error('画像ファイルを選択してください'));
+          }
+          const reader = new FileReader();
+          reader.readAsDataURL(file);
+          reader.onload = (e) => {
+            const img = new Image();
+            img.src = e.target.result;
+            img.onload = () => {
+              const canvas = document.createElement('canvas');
+              let width = img.width;
+              let height = img.height;
+
+              if (width > maxWidth) {
+                height = Math.round((height * maxWidth) / width);
+                width = maxWidth;
+              }
+
+              canvas.width = width;
+              canvas.height = height;
+              const ctx = canvas.getContext('2d');
+              ctx.drawImage(img, 0, 0, width, height);
+
+              const dataUrl = canvas.toDataURL('image/jpeg', quality);
+              resolve(dataUrl);
+            };
+            img.onerror = (err) => reject(err);
+          };
+          reader.onerror = (err) => reject(err);
+        });
+      }
+
       // --- ストレージ & API ---
       const STORAGE_KEYS = {
         PLANS: 'dp_plans_v3',
@@ -171,14 +207,20 @@
           thumbnail_url: 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=600&auto=format&fit=crop&q=80',
           status: 'planned',
           last_modified_by: '彼氏',
-          last_modified_at: new Date().toISOString()
+          last_modified_at: new Date().toISOString(),
+          checklist: [
+            { id: 'chk_1', text: 'モバイルバッテリーを充電する', checked: true, checked_by: '彼氏', checked_at: '2026-10-09' },
+            { id: 'chk_2', text: '渋谷スカイのWEBチケットを購入', checked: true, checked_by: '彼女', checked_at: '2026-10-09' },
+            { id: 'chk_3', text: 'ディナー予約の確認', checked: false, checked_by: '', checked_at: '' }
+          ]
         }
       ];
 
       const INITIAL_SCHEDULES = {
         plan_sample_01: [
           { schedule_id: 'sch_1', plan_id: 'plan_sample_01', spot_order: 1, start_time: '11:30', duration_min: 75, transit_min: 15, spot_name: 'FUGLEN TOKYO (カフェ)', category: 'cafe', address: '東京都渋谷区富ヶ谷1-16-11', lat: 35.6668, lng: 139.6922, budget_per_person: 900, budget_for_two: 1800, budget_input_type: 'per_person', memo: 'テラス席がおすすめ。ノルウェー風ワッフル', image_url: 'https://images.unsplash.com/photo-1501339847302-ac426a4a7cbb?w=400&auto=format&fit=crop&q=80' },
-          { schedule_id: 'sch_2', plan_id: 'plan_sample_01', spot_order: 2, start_time: '13:00', duration_min: 90, transit_min: 20, spot_name: '代官山 蔦屋書店 & 散策', category: 'walk', address: '東京都渋谷区猿楽町17-5', lat: 35.649, lng: 139.7022, budget_per_person: 600, budget_for_two: 1200, budget_input_type: 'per_person', memo: 'アート本や文具を一緒に見て、外のベンチでひと休み', image_url: 'https://images.unsplash.com/photo-1526778548025-fa2f459cd5c1?w=400&auto=format&fit=crop&q=80' }
+          { schedule_id: 'sch_2', plan_id: 'plan_sample_01', spot_order: 2, start_time: '13:00', duration_min: 90, transit_min: 20, spot_name: '代官山 蔦屋書店 & 散策', category: 'walk', address: '東京都渋谷区猿楽町17-5', lat: 35.649, lng: 139.7022, budget_per_person: 600, budget_for_two: 1200, budget_input_type: 'per_person', memo: 'アート本や文具を一緒に見て、外のベンチでひと休み', image_url: 'https://images.unsplash.com/photo-1526778548025-fa2f459cd5c1?w=400&auto=format&fit=crop&q=80' },
+          { schedule_id: 'sch_3', plan_id: 'plan_sample_01', spot_order: 3, start_time: '15:10', duration_min: 90, transit_min: 15, spot_name: 'SHIBUYA SKY (展望台)', category: 'night_view', address: '東京都渋谷区渋谷2-24-12', lat: 35.6585, lng: 139.7025, budget_per_person: 2200, budget_for_two: 4400, budget_input_type: 'per_person', memo: '夕暮れから日没のグラデーションが最高', image_url: 'https://images.unsplash.com/photo-1503899036084-c55cdd92da26?w=400&auto=format&fit=crop&q=80' }
         ]
       };
 
@@ -201,7 +243,69 @@
       let cachedWishlist = getLocal(STORAGE_KEYS.WISHLIST, INITIAL_WISHLIST);
       let currentUser = getLocal(STORAGE_KEYS.USER, '彼氏');
 
-      // GAS通信
+      // --- JSONP 通信フォールバック ---
+      function callGasJsonp(action, data = {}) {
+        return new Promise((resolve) => {
+          const callbackName = 'dp_cb_' + Math.random().toString(36).substring(2, 10);
+          const script = document.createElement('script');
+          const timeout = setTimeout(() => {
+            cleanup();
+            resolve({ success: false, error: 'JSONP timeout' });
+          }, 8000);
+
+          function cleanup() {
+            delete window[callbackName];
+            if (script.parentNode) script.parentNode.removeChild(script);
+            clearTimeout(timeout);
+          }
+
+          window[callbackName] = (res) => {
+            cleanup();
+            resolve(res);
+          };
+
+          const params = new URLSearchParams({ action, callback: callbackName, ...data });
+          script.src = `${CONFIG.gasUrl}?${params.toString()}`;
+          script.onerror = () => {
+            cleanup();
+            resolve({ success: false, error: 'JSONP load error' });
+          };
+          document.body.appendChild(script);
+        });
+      }
+
+      // --- formPost 通信フォールバック (iframe) ---
+      function callGasFormPost(action, data = {}) {
+        return new Promise((resolve) => {
+          const iframeName = 'gas_post_iframe_' + Math.random().toString(36).substring(2, 9);
+          const iframe = document.createElement('iframe');
+          iframe.name = iframeName;
+          iframe.style.display = 'none';
+          document.body.appendChild(iframe);
+
+          const form = document.createElement('form');
+          form.method = 'POST';
+          form.action = CONFIG.gasUrl;
+          form.target = iframeName;
+
+          const input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = 'payload';
+          input.value = JSON.stringify({ action, ...data });
+          form.appendChild(input);
+
+          document.body.appendChild(form);
+          form.submit();
+
+          setTimeout(() => {
+            if (form.parentNode) form.parentNode.removeChild(form);
+            if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+            resolve({ success: true, via: 'iframe_fallback' });
+          }, 1500);
+        });
+      }
+
+      // --- GAS通信 統合ハンドラー ---
       async function callGas(action, method = 'GET', data = {}) {
         if (!CONFIG.gasUrl || CONFIG.gasUrl.includes('YOUR_GAS_ID')) return { success: false };
         try {
@@ -218,9 +322,15 @@
             if (res.ok) return await res.json();
           }
         } catch (e) {
-          console.warn('GAS call error:', e);
+          console.warn('Fetch failed, falling back to JSONP/formPost:', e);
         }
-        return { success: false };
+
+        // フォールバック実行
+        if (method === 'GET') {
+          return await callGasJsonp(action, data);
+        } else {
+          return await callGasFormPost(action, data);
+        }
       }
 
       async function fetchPlans() {
@@ -234,7 +344,8 @@
                 ...p,
                 date: resolvedDate,
                 start_time: resolvedStartTime,
-                last_modified_by: p.last_modified_by || prev?.last_modified_by || '彼氏'
+                last_modified_by: p.last_modified_by || prev?.last_modified_by || '彼氏',
+                checklist: p.checklist || prev?.checklist || []
               };
             });
             setLocal(STORAGE_KEYS.PLANS, cachedPlans);
@@ -262,7 +373,8 @@
           start_time: plan.start_time || existing?.start_time || '11:00',
           last_modified_by: currentUser || '彼氏',
           last_modified_at: now,
-          schedule: cachedSchedules[planId] || existing?.schedule || []
+          schedule: cachedSchedules[planId] || existing?.schedule || [],
+          checklist: plan.checklist || existing?.checklist || []
         };
         const idx = cachedPlans.findIndex(p => p.plan_id === planId);
         if (idx >= 0) cachedPlans[idx] = normPlan;
@@ -319,7 +431,6 @@
 
       async function saveWish(wish) {
         const targetName = (wish.spot_name || '').trim().toLowerCase();
-        // 重複チェック
         let existing = cachedWishlist.find(w =>
           (wish.wish_id && w.wish_id === wish.wish_id) ||
           (targetName && (w.spot_name || '').trim().toLowerCase() === targetName)
@@ -374,7 +485,7 @@
       }
       const useToast = () => useContext(ToastContext);
 
-      // --- 共通コンポーネント ---
+      // --- 共通コンポーネント: Header ---
       function Header({ currentPath, onNavigate }) {
         const [user, setUser] = useState(currentUser || '彼氏');
         const toggleUser = () => {
@@ -431,6 +542,221 @@
         },
           React.createElement(Icons[cat.icon] || Icons.MapPin, { className: 'w-3.5 h-3.5' }),
           showName && cat.display_name
+        );
+      }
+
+      // --- 共通コンポーネント: Leaflet 地図表示 & ルート描画 ---
+      function LeafletMap({ spots = [], height = '340px' }) {
+        const mapContainerRef = useRef(null);
+        const mapInstanceRef = useRef(null);
+
+        useEffect(() => {
+          if (!mapContainerRef.current) return;
+          if (!window.L) return;
+
+          // 既存マップをクリア
+          if (mapInstanceRef.current) {
+            mapInstanceRef.current.remove();
+            mapInstanceRef.current = null;
+          }
+
+          const validSpots = spots.filter(s => s.lat && s.lng);
+          const defaultCenter = validSpots.length > 0 ? [validSpots[0].lat, validSpots[0].lng] : [35.6812, 139.7671];
+
+          const map = L.map(mapContainerRef.current, {
+            zoomControl: true,
+            scrollWheelZoom: false
+          }).setView(defaultCenter, 13);
+          mapInstanceRef.current = map;
+
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+          }).addTo(map);
+
+          const latlngs = [];
+
+          validSpots.forEach((s, idx) => {
+            const pos = [s.lat, s.lng];
+            latlngs.push(pos);
+
+            const iconHtml = `<div style="background-color: #B85C4F; color: #fff; width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 12px; border: 2px solid #fff; box-shadow: 0 2px 5px rgba(0,0,0,0.3);">${idx + 1}</div>`;
+            const customIcon = L.divIcon({
+              html: iconHtml,
+              className: 'custom-leaflet-marker',
+              iconSize: [26, 26],
+              iconAnchor: [13, 13]
+            });
+
+            const marker = L.marker(pos, { icon: customIcon }).addTo(map);
+            marker.bindPopup(`
+              <div style="font-size: 12px; padding: 2px;">
+                <div style="font-weight: bold; color: #B85C4F; margin-bottom: 2px;">${idx + 1}. ${s.spot_name}</div>
+                <div>時間: ${s.start_time || ''}</div>
+                <div>住所: ${s.address || '未設定'}</div>
+              </div>
+            `);
+          });
+
+          // ルート線の描画
+          if (latlngs.length >= 2) {
+            L.polyline(latlngs, {
+              color: '#B85C4F',
+              weight: 4,
+              opacity: 0.7,
+              dashArray: '6, 8',
+              lineCap: 'round'
+            }).addTo(map);
+          }
+
+          if (latlngs.length > 0) {
+            const bounds = L.latLngBounds(latlngs);
+            map.fitBounds(bounds, { padding: [40, 40] });
+          }
+
+          return () => {
+            if (mapInstanceRef.current) {
+              mapInstanceRef.current.remove();
+              mapInstanceRef.current = null;
+            }
+          };
+        }, [spots]);
+
+        return React.createElement('div', {
+          ref: mapContainerRef,
+          style: { height, width: '100%', borderRadius: '1rem', overflow: 'hidden' },
+          className: 'border border-[#E8E4DE] shadow-2xs'
+        });
+      }
+
+      // --- 共通コンポーネント: 予算集計バー ---
+      function BudgetProgressBar({ budgetLimit = 0, currentBudget = 0 }) {
+        const limit = Number(budgetLimit) || 0;
+        const total = Number(currentBudget) || 0;
+        const percent = limit > 0 ? Math.min(Math.round((total / limit) * 100), 100) : 0;
+        const isOver = limit > 0 && total > limit;
+        const remaining = limit - total;
+
+        return React.createElement('div', { className: 'bg-white rounded-xl border border-[#E8E4DE] p-4 space-y-2.5 shadow-2xs text-xs' },
+          React.createElement('div', { className: 'flex justify-between items-center' },
+            React.createElement('span', { className: 'font-semibold text-[#2D2A26]' }, 'デート予算の進捗'),
+            React.createElement('span', { className: `font-bold ${isOver ? 'text-red-500' : 'text-[#6B6560]'}` },
+              limit > 0 ? `${formatYen(total)} / ${formatYen(limit)} (${percent}%)` : `合計: ${formatYen(total)}`
+            )
+          ),
+          limit > 0 && React.createElement('div', { className: 'w-full bg-[#E8E4DE] h-2.5 rounded-full overflow-hidden' },
+            React.createElement('div', {
+              className: `h-full rounded-full transition-all duration-500 ${isOver ? 'bg-red-500' : 'bg-[#B85C4F]'}`,
+              style: { width: `${percent}%` }
+            })
+          ),
+          limit > 0 && React.createElement('div', { className: 'flex justify-between text-[11px] text-[#6B6560]' },
+            React.createElement('span', null, `1人あたり: ${formatYen(Math.round(total / 2))}`),
+            React.createElement('span', { className: isOver ? 'text-red-500 font-semibold' : '' },
+              isOver ? `予算オーバー: +${formatYen(total - limit)}` : `残り目安: ${formatYen(remaining)}`
+            )
+          )
+        );
+      }
+
+      // --- 共通コンポーネント: 持ち物・やることチェックリスト ---
+      function ChecklistSection({ planId, checklist = [], onUpdateChecklist }) {
+        const [items, setItems] = useState(checklist || []);
+        const [newText, setNewText] = useState('');
+
+        useEffect(() => {
+          setItems(checklist || []);
+        }, [checklist]);
+
+        const toggleItem = (id) => {
+          const updated = items.map(item => {
+            if (item.id === id) {
+              const nextState = !item.checked;
+              return {
+                ...item,
+                checked: nextState,
+                checked_by: nextState ? (currentUser || '彼氏') : '',
+                checked_at: nextState ? new Date().toISOString().substring(0, 10) : ''
+              };
+            }
+            return item;
+          });
+          setItems(updated);
+          onUpdateChecklist(updated);
+
+          // 全完了でConfetti紙吹雪
+          if (updated.length > 0 && updated.every(x => x.checked)) {
+            if (window.confetti) {
+              window.confetti({ particleCount: 70, spread: 60, origin: { y: 0.8 } });
+            }
+          }
+        };
+
+        const addItem = (e) => {
+          e.preventDefault();
+          if (!newText.trim()) return;
+          const newItem = {
+            id: 'chk_' + Math.random().toString(36).substring(2, 9),
+            text: newText.trim(),
+            checked: false,
+            checked_by: '',
+            checked_at: ''
+          };
+          const next = [...items, newItem];
+          setItems(next);
+          setNewText('');
+          onUpdateChecklist(next);
+        };
+
+        const removeItem = (id) => {
+          const next = items.filter(x => x.id !== id);
+          setItems(next);
+          onUpdateChecklist(next);
+        };
+
+        return React.createElement('div', { className: 'bg-white rounded-2xl border border-[#E8E4DE] p-5 space-y-3.5 shadow-xs text-xs' },
+          React.createElement('div', { className: 'flex justify-between items-center' },
+            React.createElement('h3', { className: 'text-sm font-bold font-serif text-[#2D2A26] flex items-center gap-1.5' },
+              React.createElement(Icons.CheckSquare, { className: 'w-4 h-4 text-[#B85C4F]' }),
+              '持ち物・やることチェックリスト'
+            ),
+            React.createElement('span', { className: 'text-[11px] text-[#6B6560]' },
+              `${items.filter(x => x.checked).length} / ${items.length} 完了`
+            )
+          ),
+          React.createElement('div', { className: 'space-y-2' },
+            items.map(item => React.createElement('div', {
+              key: item.id,
+              className: `flex items-center justify-between p-2.5 rounded-lg border transition-all ${item.checked ? 'bg-[#F5F3EF]/60 border-transparent text-[#6B6560] line-through' : 'bg-white border-[#E8E4DE]'}`
+            },
+              React.createElement('label', { className: 'flex items-center gap-2 cursor-pointer flex-1 select-none' },
+                React.createElement('input', {
+                  type: 'checkbox',
+                  checked: !!item.checked,
+                  onChange: () => toggleItem(item.id),
+                  className: 'accent-[#B85C4F] w-4 h-4 rounded cursor-pointer'
+                }),
+                React.createElement('span', { className: 'text-xs' }, item.text),
+                item.checked && item.checked_by && React.createElement('span', { className: 'text-[10px] bg-white px-1.5 py-0.5 rounded border border-[#E8E4DE] no-underline not-italic' }, `${item.checked_by} ✓`)
+              ),
+              React.createElement('button', {
+                onClick: () => removeItem(item.id),
+                className: 'text-gray-400 hover:text-red-500 p-1'
+              }, React.createElement(Icons.X, { className: 'w-3.5 h-3.5' }))
+            ))
+          ),
+          React.createElement('form', { onSubmit: addItem, className: 'flex gap-2 pt-1' },
+            React.createElement('input', {
+              type: 'text',
+              value: newText,
+              onChange: e => setNewText(e.target.value),
+              placeholder: '持ち物や事前準備を追加...',
+              className: 'flex-1 px-3 py-1.5 border border-[#E8E4DE] rounded-lg text-xs outline-none focus:border-[#B85C4F]'
+            }),
+            React.createElement('button', {
+              type: 'submit',
+              className: 'px-3 py-1.5 bg-[#B85C4F] text-white rounded-lg font-semibold hover:bg-[#9A4D42]'
+            }, '追加')
+          )
         );
       }
 
@@ -525,7 +851,7 @@
         );
       }
 
-      // --- 画面3: 新規・基本情報編集 ---
+      // --- 画面3: 新規・基本情報編集（写真圧縮アップロード対応） ---
       function PlanFormPage({ planId, onNavigate }) {
         const { showToast } = useToast();
         const [title, setTitle] = useState('');
@@ -539,6 +865,7 @@
         const [area, setArea] = useState('');
         const [budgetLimit, setBudgetLimit] = useState(15000);
         const [description, setDescription] = useState('');
+        const [thumbnailUrl, setThumbnailUrl] = useState('');
         const [loading, setLoading] = useState(false);
 
         useEffect(() => {
@@ -554,11 +881,25 @@
                 if (target.area) setArea(target.area);
                 if (target.budget_limit !== undefined) setBudgetLimit(target.budget_limit);
                 if (target.description) setDescription(target.description);
+                if (target.thumbnail_url) setThumbnailUrl(target.thumbnail_url);
               }
               setLoading(false);
             });
           }
         }, [planId]);
+
+        const handleImageUpload = async (e) => {
+          const file = e.target.files?.[0];
+          if (!file) return;
+          try {
+            showToast('画像を圧縮中...');
+            const compressed = await compressImage(file, 800, 0.7);
+            setThumbnailUrl(compressed);
+            showToast('カバー写真を設定しました');
+          } catch (err) {
+            showToast('画像圧縮に失敗しました', 'error');
+          }
+        };
 
         const handleSubmit = async (e) => {
           e.preventDefault();
@@ -574,7 +915,8 @@
             prefecture,
             area: area.trim(),
             budget_limit: Number(budgetLimit),
-            description: description.trim()
+            description: description.trim(),
+            thumbnail_url: thumbnailUrl
           });
           showToast('基本情報を保存しました！');
           onNavigate(`/plan/${saved.plan_id}/spots`);
@@ -657,6 +999,18 @@
                 className: 'w-full px-3 py-2 rounded-lg border border-[#E8E4DE] outline-none'
               })
             ),
+            React.createElement('div', null,
+              React.createElement('label', { className: 'block text-xs font-semibold mb-1' }, 'カバー写真（自動圧縮）'),
+              React.createElement('input', {
+                type: 'file',
+                accept: 'image/*',
+                onChange: handleImageUpload,
+                className: 'w-full text-xs text-[#6B6560]'
+              }),
+              thumbnailUrl && React.createElement('div', { className: 'mt-2 h-28 rounded-lg overflow-hidden border border-[#E8E4DE]' },
+                React.createElement('img', { src: thumbnailUrl, className: 'w-full h-full object-cover' })
+              )
+            ),
             React.createElement('div', { className: 'flex justify-end gap-3 pt-3 border-t border-[#E8E4DE]' },
               React.createElement('button', {
                 type: 'button',
@@ -681,8 +1035,11 @@
         const [category, setCategory] = useState('cafe');
         const [address, setAddress] = useState('');
         const [duration, setDuration] = useState(60);
+        const [transit, setTransit] = useState(15);
         const [budget, setBudget] = useState(1500);
         const [memo, setMemo] = useState('');
+        const [lat, setLat] = useState('');
+        const [lng, setLng] = useState('');
 
         useEffect(() => {
           fetchPlans().then(list => {
@@ -703,8 +1060,10 @@
             spot_name: cleanSpotName,
             category,
             address: address.trim(),
-            duration_min: Number(duration),
-            transit_min: 15,
+            lat: lat ? Number(lat) : null,
+            lng: lng ? Number(lng) : null,
+            duration_min: Number(duration) || 60,
+            transit_min: Number(transit) || 15,
             budget_per_person: Math.round(Number(budget) / 2),
             budget_for_two: Number(budget),
             memo: memo.trim()
@@ -725,6 +1084,8 @@
               spot_name: cleanSpotName,
               category,
               address: address.trim(),
+              lat: lat ? Number(lat) : null,
+              lng: lng ? Number(lng) : null,
               estimated_budget_for_two: Number(budget),
               memo: memo.trim() ? `[${plan?.title || 'プラン'}より登録] ${memo.trim()}` : `[${plan?.title || 'プラン'}より登録]`,
               tag: 'プラン登録済み',
@@ -732,12 +1093,14 @@
             });
             showToast(`「${cleanSpotName}」を登録し、行きたいリストにも連動しました！`);
           } else {
-            showToast(`「${cleanSpotName}」をプランに登録しました！（行きたいリストに登録済み）`);
+            showToast(`「${cleanSpotName}」を登録しました！（行きたいリストに登録済みです）`);
           }
 
           setSpotName('');
           setAddress('');
           setMemo('');
+          setLat('');
+          setLng('');
         };
 
         const handleDelete = async (schId) => {
@@ -747,21 +1110,32 @@
           showToast('スポットを削除しました', 'info');
         };
 
+        const moveSpot = async (idx, direction) => {
+          const targetIdx = idx + direction;
+          if (targetIdx < 0 || targetIdx >= spots.length) return;
+          const cloned = [...spots];
+          const temp = cloned[idx];
+          cloned[idx] = cloned[targetIdx];
+          cloned[targetIdx] = temp;
+          const updated = await saveSchedule(planId, cloned, plan?.start_time || '11:00');
+          setSpots(updated);
+        };
+
         return React.createElement('div', { className: 'max-w-4xl mx-auto px-4 py-8 space-y-6' },
           React.createElement('div', { className: 'flex items-center justify-between' },
             React.createElement('div', null,
-              React.createElement('h1', { className: 'text-2xl font-bold font-serif' }, 'スポットの登録'),
+              React.createElement('h1', { className: 'text-2xl font-bold font-serif' }, 'スポットの登録 & スケジュール調整'),
               React.createElement('p', { className: 'text-xs text-[#6B6560] mt-1' }, `${plan?.title || ''}（${formatDateDisplay(plan?.date)}）に立ち寄る場所を追加`)
             ),
             React.createElement('button', {
               onClick: () => onNavigate(`/plan/${planId}`),
-              className: 'px-4 py-2 bg-[#5A8F7B] text-white text-xs font-semibold rounded-lg hover:bg-emerald-700'
+              className: 'px-4 py-2 bg-[#5A8F7B] text-white text-xs font-semibold rounded-lg hover:bg-emerald-700 shadow-xs'
             }, 'しおりを完成する ✓')
           ),
 
           React.createElement('div', { className: 'grid grid-cols-1 md:grid-cols-2 gap-6 items-start' },
             // スポット追加フォーム
-            React.createElement('form', { onSubmit: handleAddSpot, className: 'bg-white rounded-2xl border border-[#E8E4DE] p-5 space-y-3.5 text-xs shadow-xs' },
+            React.createElement('form', { onSubmit: handleAddSpot, className: 'bg-white rounded-2xl border border-[#E8E4DE] p-5 space-y-3 text-xs shadow-xs' },
               React.createElement('h3', { className: 'text-sm font-bold font-serif text-[#2D2A26]' }, '＋ スポットを追加する'),
               React.createElement('div', null,
                 React.createElement('label', { className: 'block font-semibold mb-1' }, 'スポット・店舗名 *'),
@@ -794,23 +1168,45 @@
                   })
                 )
               ),
-              React.createElement('div', null,
-                React.createElement('label', { className: 'block font-semibold mb-1' }, '予算目安（2人分）'),
-                React.createElement('input', {
-                  type: 'number',
-                  step: 100,
-                  value: budget,
-                  onChange: e => setBudget(e.target.value),
-                  className: 'w-full px-3 py-2 rounded-lg border border-[#E8E4DE] outline-none'
-                })
+              React.createElement('div', { className: 'grid grid-cols-2 gap-2' },
+                React.createElement('div', null,
+                  React.createElement('label', { className: 'block font-semibold mb-1' }, '移動時間 (次の場所へ分)'),
+                  React.createElement('input', {
+                    type: 'number',
+                    step: 5,
+                    value: transit,
+                    onChange: e => setTransit(e.target.value),
+                    className: 'w-full px-3 py-2 rounded-lg border border-[#E8E4DE] outline-none'
+                  })
+                ),
+                React.createElement('div', null,
+                  React.createElement('label', { className: 'block font-semibold mb-1' }, '予算目安（2人分）'),
+                  React.createElement('input', {
+                    type: 'number',
+                    step: 100,
+                    value: budget,
+                    onChange: e => setBudget(e.target.value),
+                    className: 'w-full px-3 py-2 rounded-lg border border-[#E8E4DE] outline-none'
+                  })
+                )
               ),
               React.createElement('div', null,
-                React.createElement('label', { className: 'block font-semibold mb-1' }, '住所・メモ'),
+                React.createElement('label', { className: 'block font-semibold mb-1' }, '住所・最寄り駅'),
                 React.createElement('input', {
                   type: 'text',
                   value: address,
                   onChange: e => setAddress(e.target.value),
                   placeholder: '例: 神奈川県鎌倉市...',
+                  className: 'w-full px-3 py-2 rounded-lg border border-[#E8E4DE] outline-none'
+                })
+              ),
+              React.createElement('div', null,
+                React.createElement('label', { className: 'block font-semibold mb-1' }, 'メモ'),
+                React.createElement('input', {
+                  type: 'text',
+                  value: memo,
+                  onChange: e => setMemo(e.target.value),
+                  placeholder: '予約番号、おすすめメニューなど',
                   className: 'w-full px-3 py-2 rounded-lg border border-[#E8E4DE] outline-none'
                 })
               ),
@@ -820,30 +1216,42 @@
               }, 'スポットを登録する（行きたいリストにも連動）')
             ),
 
-            // 登録済みスポット一覧
+            // 登録済みスポット一覧（並び替え・削除対応）
             React.createElement('div', { className: 'bg-white rounded-2xl border border-[#E8E4DE] p-5 space-y-3 shadow-xs' },
               React.createElement('h3', { className: 'text-sm font-bold font-serif text-[#2D2A26] flex items-center justify-between' },
                 React.createElement('span', null, `登録済みスポット (${spots.length}件)`),
                 React.createElement('span', { className: 'text-xs text-[#6B6560] font-normal' }, `開始: ${plan?.start_time || '11:00'}〜`)
               ),
-              spots.length === 0 ? React.createElement('p', { className: 'text-xs text-[#6B6560] py-6 text-center' }, 'まだスポットが登録されていません') :
-              React.createElement('div', { className: 'space-y-2' },
+              spots.length === 0 ? React.createElement('p', { className: 'text-xs text-[#6B6560] py-8 text-center' }, 'まだスポットが登録されていません') :
+              React.createElement('div', { className: 'space-y-2.5' },
                 spots.map((s, idx) => React.createElement('div', {
                   key: s.schedule_id,
-                  className: 'flex items-center justify-between p-3 rounded-xl border border-[#E8E4DE] bg-[#F5F3EF]/50 text-xs'
+                  className: 'flex items-center justify-between p-3 rounded-xl border border-[#E8E4DE] bg-[#F5F3EF]/40 text-xs'
                 },
-                  React.createElement('div', { className: 'space-y-0.5' },
+                  React.createElement('div', { className: 'space-y-1' },
                     React.createElement('div', { className: 'flex items-center gap-1.5' },
                       React.createElement('span', { className: 'font-bold text-[#B85C4F]' }, s.start_time),
                       React.createElement(CategoryBadge, { category: s.category })
                     ),
                     React.createElement('div', { className: 'font-bold text-[#2D2A26]' }, `${idx + 1}. ${s.spot_name}`),
-                    React.createElement('div', { className: 'text-[#6B6560] text-[11px]' }, `滞在: ${s.duration_min}分 · 予算: ${formatYen(s.budget_for_two)}`)
+                    React.createElement('div', { className: 'text-[#6B6560] text-[11px]' }, `滞在: ${s.duration_min}分 · 移動: ${s.transit_min || 15}分 · 予算: ${formatYen(s.budget_for_two)}`)
                   ),
-                  React.createElement('button', {
-                    onClick: () => handleDelete(s.schedule_id),
-                    className: 'text-red-500 hover:text-red-700 p-1.5'
-                  }, React.createElement(Icons.Trash2, { className: 'w-4 h-4' }))
+                  React.createElement('div', { className: 'flex items-center gap-1' },
+                    React.createElement('button', {
+                      onClick: () => moveSpot(idx, -1),
+                      disabled: idx === 0,
+                      className: 'p-1 hover:bg-white rounded text-gray-500 disabled:opacity-30'
+                    }, React.createElement(Icons.ArrowUp, { className: 'w-3.5 h-3.5' })),
+                    React.createElement('button', {
+                      onClick: () => moveSpot(idx, 1),
+                      disabled: idx === spots.length - 1,
+                      className: 'p-1 hover:bg-white rounded text-gray-500 disabled:opacity-30'
+                    }, React.createElement(Icons.ArrowDown, { className: 'w-3.5 h-3.5' })),
+                    React.createElement('button', {
+                      onClick: () => handleDelete(s.schedule_id),
+                      className: 'text-red-500 hover:text-red-700 p-1 ml-1'
+                    }, React.createElement(Icons.Trash2, { className: 'w-3.5 h-3.5' }))
+                  )
                 ))
               )
             )
@@ -870,7 +1278,6 @@
           const w = await fetchWishlist();
           setWishes(w);
 
-          // 全デートプランからスポットを自動集約
           const pList = await fetchPlans();
           let aggregated = [];
           for (const p of pList) {
@@ -1077,7 +1484,7 @@
         );
       }
 
-      // --- 画面6: 当日のしおり閲覧 ---
+      // --- 画面6: 当日のしおり閲覧（Leaflet地図・ルート・予算バー・チェックリスト完備） ---
       function PlanViewPage({ planId, onNavigate }) {
         const [plan, setPlan] = useState(null);
         const [spots, setSpots] = useState([]);
@@ -1092,6 +1499,18 @@
 
         const totalBudget = spots.reduce((acc, s) => acc + (s.budget_for_two || 0), 0);
 
+        const handleUpdateChecklist = async (updatedList) => {
+          const updatedPlan = { ...plan, checklist: updatedList };
+          setPlan(updatedPlan);
+          await savePlan(updatedPlan);
+        };
+
+        const triggerConfetti = () => {
+          if (window.confetti) {
+            window.confetti({ particleCount: 90, spread: 70, origin: { y: 0.6 } });
+          }
+        };
+
         return React.createElement('div', { className: 'max-w-2xl mx-auto px-4 py-8 space-y-6 print-page' },
           React.createElement('div', { className: 'flex items-center justify-between no-print' },
             React.createElement('button', {
@@ -1099,6 +1518,10 @@
               className: 'text-xs text-[#6B6560] hover:text-[#2D2A26]'
             }, '← プラン一覧に戻る'),
             React.createElement('div', { className: 'flex gap-2' },
+              React.createElement('button', {
+                onClick: triggerConfetti,
+                className: 'px-3 py-1.5 border border-[#E8E4DE] bg-white rounded-lg text-xs font-medium hover:bg-[#F5F3EF]'
+              }, '🎉 祝杯'),
               React.createElement('button', {
                 onClick: () => window.print(),
                 className: 'px-3 py-1.5 border border-[#E8E4DE] bg-white rounded-lg text-xs font-medium'
@@ -1110,7 +1533,11 @@
             )
           ),
 
-          React.createElement('div', { className: 'bg-white rounded-2xl border border-[#E8E4DE] p-6 space-y-3 shadow-xs' },
+          // カバー・ヘッダー情報
+          React.createElement('div', { className: 'bg-white rounded-2xl border border-[#E8E4DE] p-6 space-y-3 shadow-xs overflow-hidden' },
+            plan.thumbnail_url && React.createElement('div', { className: 'w-full h-44 -mt-6 -mx-6 mb-4 overflow-hidden' },
+              React.createElement('img', { src: plan.thumbnail_url, className: 'w-full h-full object-cover' })
+            ),
             React.createElement('div', { className: 'flex items-center gap-2 text-xs' },
               React.createElement('span', { className: 'font-bold text-[#B85C4F] bg-[#B85C4F]/10 px-2.5 py-1 rounded' }, formatDateDisplay(plan.date)),
               React.createElement('span', { className: 'text-[#6B6560]' }, `${plan.start_time || '11:00'}〜 スタート`),
@@ -1124,7 +1551,19 @@
             )
           ),
 
-          // タイムライン
+          // 予算集計プログレスバー
+          React.createElement(BudgetProgressBar, {
+            budgetLimit: plan.budget_limit,
+            currentBudget: totalBudget
+          }),
+
+          // Leaflet地図 & ルート
+          spots.some(s => s.lat && s.lng) && React.createElement('div', { className: 'space-y-2' },
+            React.createElement('h2', { className: 'text-sm font-bold font-serif text-[#2D2A26]' }, '立ち寄りルート・マップ'),
+            React.createElement(LeafletMap, { spots, height: '300px' })
+          ),
+
+          // タイムラインスケジュール
           React.createElement('div', { className: 'space-y-4' },
             React.createElement('h2', { className: 'text-base font-bold font-serif' }, `当日のスケジュール (${spots.length}ヶ所)`),
             spots.map((s, idx) => {
@@ -1135,7 +1574,7 @@
                     React.createElement('span', { className: 'font-bold text-[#B85C4F]' }, `${s.start_time} 〜 ${endTime}`),
                     React.createElement(CategoryBadge, { category: s.category })
                   ),
-                  React.createElement('h3', { className: 'text-base font-bold text-[#2D2A26]' }, s.spot_name),
+                  React.createElement('h3', { className: 'text-base font-bold text-[#2D2A26]' }, `${idx + 1}. ${s.spot_name}`),
                   s.address && React.createElement('p', { className: 'text-xs text-[#6B6560]' }, `📍 ${s.address}`),
                   s.memo && React.createElement('p', { className: 'text-xs text-[#6B6560] bg-[#F5F3EF] p-2.5 rounded-lg' }, s.memo),
                   React.createElement('div', { className: 'flex justify-between items-center pt-2 border-t border-[#E8E4DE] text-xs text-[#6B6560]' },
@@ -1149,7 +1588,14 @@
                 )
               );
             })
-          )
+          ),
+
+          // 持ち物・やることチェックリスト
+          React.createElement(ChecklistSection, {
+            planId,
+            checklist: plan.checklist || [],
+            onUpdateChecklist: handleUpdateChecklist
+          })
         );
       }
 
